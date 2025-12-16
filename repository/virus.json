@@ -1,0 +1,47 @@
+{
+  "libraries": [
+    {
+      "name": "std",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "url": "https://repo.vira/std/1.0.0/std.vira"
+        },
+        {
+          "version": "1.1.0",
+          "url": "https://repo.vira/std/1.1.0/std.vira"
+        }
+      ]
+    },
+    {
+      "name": "math",
+      "versions": [
+        {
+          "version": "0.1.0",
+          "url": "https://repo.vira/math/0.1.0/math.vira"
+        },
+        {
+          "version": "0.2.0",
+          "url": "https://repo.vira/math/0.2.0/math.vira"
+        },
+        {
+          "version": "0.2.1",
+          "url": "https://repo.vira/math/0.2.1/math.vira"
+        }
+      ]
+    },
+    {
+      "name": "net",
+      "versions": [
+        {
+          "version": "0.5.0",
+          "url": "https://repo.vira/net/0.5.0/net.vira"
+        },
+        {
+          "version": "0.5.1",
+          "url": "https://repo.vira/net/0.5.1/net.vira"
+        }
+      ]
+    }
+  ]
+}
