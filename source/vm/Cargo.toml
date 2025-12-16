@@ -1,1 +1,9 @@
+[package]
+name = "vm"
+version = "0.1.0"
+edition = "2021"
+authors = ["Michał Kaczmarzyk <michalkaczmarzyk2009@gmail.com>"]
+description = "vm for vira lang"
+license = "BSD-3"
 
+[dependencies]
