@@ -1,18 +1,17 @@
 use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File};
-use std::io::{self, BufRead, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-
+use std::io::{self, Write};
+use std::process::Command;
 use cranelift::prelude::*;
-use cranelift_codegen::binemit::{NullStackMapSink, NullTrapSink};
-use cranelift_codegen::ir::{AbiParam, ExternalName, InstBuilder, MemFlags};
-use cranelift_codegen::isa::{self, CallConv};
+use cranelift_codegen::ir::{AbiParam, InstBuilder, UserFuncName};
+use cranelift_codegen::isa::{self};
 use cranelift_codegen::settings::{self, Configurable};
+use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
-use cranelift_module::{DataContext, Linkage, Module};
+use cranelift_module::{Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
+use target_lexicon::Triple;
 
 #[derive(Debug, PartialEq, Clone)]
 enum Token {
@@ -39,7 +38,6 @@ impl Lexer {
         if self.position >= self.input.len() {
             return Token::EOF;
         }
-
         let ch = self.current_char();
         if ch.is_alphabetic() || ch == '_' {
             return self.lex_identifier_or_keyword();
@@ -202,8 +200,6 @@ impl Parser {
 
 struct CodeGenerator {
     module: ObjectModule,
-    func_builder_ctx: FunctionBuilderContext,
-    data_ctx: DataContext,
     variables: HashMap<String, Variable>,
     var_index: usize,
 }
@@ -213,23 +209,18 @@ impl CodeGenerator {
         let mut flag_builder = settings::builder();
         flag_builder.set("use_colocated_libcalls", "false").unwrap();
         flag_builder.set("is_pic", "false").unwrap();
-        let isa_builder = isa::lookup(triple!("x86_64-unknown-linux-gnu")).unwrap(); // For Linux
-        // For Windows, we can adjust based on OS
+        let isa_builder = isa::lookup(Triple::host()).unwrap();
         let isa = isa_builder.finish(settings::Flags::new(flag_builder)).unwrap();
-
         let builder = ObjectBuilder::new(isa, "vira_module".to_owned(), cranelift_module::default_libcall_names()).unwrap();
         let module = ObjectModule::new(builder);
-
         CodeGenerator {
             module,
-            func_builder_ctx: FunctionBuilderContext::new(),
-            data_ctx: DataContext::new(),
             variables: HashMap::new(),
             var_index: 0,
         }
     }
 
-    fn generate(&mut self, ast: &ASTNode) -> Vec<u8> {
+    fn generate(mut self, ast: &ASTNode) -> Vec<u8> {
         match ast {
             ASTNode::Program(functions) => {
                 for func in functions {
@@ -238,7 +229,6 @@ impl CodeGenerator {
             }
             _ => panic!("Expected Program"),
         }
-
         let product = self.module.finish();
         product.object.write().unwrap()
     }
@@ -248,25 +238,25 @@ impl CodeGenerator {
             let mut sig = self.module.make_signature();
             sig.returns.push(AbiParam::new(types::I32)); // int return
             let func_id = self.module.declare_function(name, Linkage::Export, &sig).unwrap();
-            let mut builder = FunctionBuilder::new(&mut sig, &mut self.func_builder_ctx);
-
+            let mut func = cranelift_codegen::ir::Function::with_name_signature(
+                UserFuncName::user(0, func_id.as_u32()),
+                                                                                sig,
+            );
+            let mut builder_ctx = FunctionBuilderContext::new();
+            let mut builder = FunctionBuilder::new(&mut func, &mut builder_ctx);
             let entry_block = builder.create_block();
             builder.append_block_params_for_function_params(entry_block);
             builder.switch_to_block(entry_block);
             builder.seal_block(entry_block);
-
             for stmt in statements {
                 self.generate_statement(stmt, &mut builder);
             }
-
             // Default return 0 if no return
             let zero = builder.ins().iconst(types::I32, 0);
             builder.ins().return_(&[zero]);
-
             builder.finalize();
-
-            self.module.define_function(func_id, &mut self.data_ctx, &mut builder.func, &mut NullTrapSink {}, &mut NullStackMapSink {}).unwrap();
-            self.data_ctx.clear();
+            let mut ctx = Context::for_function(func);
+            self.module.define_function(func_id, &mut ctx).unwrap();
         } else {
             panic!("Expected Function");
         }
@@ -314,44 +304,42 @@ fn main() -> io::Result<()> {
         println!("Usage: compiler <input.vira> <output.o>");
         return Ok(());
     }
-
     let input_path = &args[1];
-    let output_path = &args[2];
-
+    let mut output_path = args[2].clone();
     let input = fs::read_to_string(input_path)?;
     let mut parser = Parser::new(input);
     let ast = parser.parse();
-
-    let mut generator = CodeGenerator::new();
+    let generator = CodeGenerator::new();
     let obj_bytes = generator.generate(&ast);
-
-    let mut file = File::create(output_path)?;
-    file.write_all(&obj_bytes)?;
-
-    // For Windows support, we can detect OS and adjust triple
     let os = env::consts::OS;
     if os == "windows" {
-        // Adjust ISA to x86_64-pc-windows-msvc or similar
+        output_path = output_path.replace(".o", ".obj");
     }
-
-    // Invoke linker to create executable
-    let linker = if os == "linux" {
-        "gcc"
+    let mut file = File::create(&output_path)?;
+    file.write_all(&obj_bytes)?;
+    let output_exe = if os == "windows" { "a.exe" } else { "a.out" };
+    let mut cmd = if os == "linux" {
+        Command::new("gcc")
+    } else if os == "macos" {
+        Command::new("clang")
     } else if os == "windows" {
-        "link.exe" // or adjust
+        Command::new("link.exe")
     } else {
         panic!("Unsupported OS");
     };
-
-    let status = Command::new(linker)
-        .arg(output_path)
-        .arg("-o")
-        .arg("a.out") // or exe on Windows
-        .status()?;
-
+    if os == "linux" || os == "macos" {
+        cmd.arg(&output_path);
+        cmd.arg("-o");
+        cmd.arg(output_exe);
+    } else if os == "windows" {
+        cmd.arg(&output_path);
+        cmd.arg(format!("/out:{}", output_exe));
+        cmd.arg("/entry:main");
+        cmd.arg("/subsystem:console");
+    }
+    let status = cmd.status()?;
     if !status.success() {
         panic!("Linking failed");
     }
-
     Ok(())
 }
