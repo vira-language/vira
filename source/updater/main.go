@@ -1,198 +1,207 @@
 package main
 
 import (
+	"archive/zip"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
-
-	"github.com/pterm/pterm"
-	"github.com/schollz/progressbar/v3"
 )
 
-var systemBinDir string
-var libDir string
-var binDir string
-var exe string
-
-func init() {
-	if runtime.GOOS == "windows" {
-		exe = ".exe"
-		systemBinDir = `C:\\Program Files\\Vira\\bin`
-		libDir = `C:\\Program Files\\Vira\\lib`
-		binDir = libDir + `\\bin`
-	} else {
-		exe = ""
-		systemBinDir = "/usr/bin"
-		libDir = "/usr/lib/vira-lang"
-		binDir = libDir + "/bin"
+func main() {
+	if err := runUpdater(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
+	fmt.Println("Update check complete.")
 }
 
-func main() {
-	pterm.Info.Println("Starting Vira Updater...")
+func runUpdater() error {
+	osName := runtime.GOOS
+	var viraDir, binDir, sysBinDir, zipName string
 
-	versionFile := libDir + "/version.json"
-	localData, err := os.ReadFile(versionFile)
-	if err != nil {
-		pterm.Error.Println("No local version found. Please install Vira first.")
-		return
+	if osName == "linux" {
+		viraDir = "/usr/lib/vira-lang"
+		binDir = filepath.Join(viraDir, "bin")
+		sysBinDir = "/usr/bin"
+		zipName = "bin-linux.zip"
+	} else if osName == "windows" {
+		programFiles := os.Getenv("ProgramFiles")
+		if programFiles == "" {
+			programFiles = "C:\\Program Files"
+		}
+		viraDir = filepath.Join(programFiles, "ViraLang")
+		binDir = filepath.Join(viraDir, "bin")
+		sysBinDir = filepath.Join(os.Getenv("SystemRoot"), "System32") // Note: Requires admin privileges
+		zipName = "bin-windows.zip"
+	} else {
+		return fmt.Errorf("unsupported OS: %s", osName)
 	}
 
-	var localVer []string
-	err = json.Unmarshal(localData, &localVer)
-	if err != nil {
-		pterm.Error.Println("Invalid local version file.")
-		return
-	}
-	localV := localVer[0]
+	versionFile := filepath.Join(viraDir, "version.json")
 
+	// Read local version
+	localVersion, err := readVersion(versionFile)
+	if err != nil {
+		return fmt.Errorf("failed to read local version: %v", err)
+	}
+
+	// Download remote version
 	remoteURL := "https://raw.githubusercontent.com/vira-language/vira/main/repository/vira-version.json"
-	resp, err := http.Get(remoteURL)
+	remoteVersionData, err := downloadFileToBytes(remoteURL)
 	if err != nil {
-		pterm.Error.Printf("Failed to fetch remote version: %v\n", err)
-		return
+		return fmt.Errorf("failed to download remote version: %v", err)
+	}
+
+	var remoteVersions []string
+	if err := json.Unmarshal(remoteVersionData, &remoteVersions); err != nil || len(remoteVersions) == 0 {
+		return fmt.Errorf("invalid remote version JSON: %v", err)
+	}
+	remoteVersion := remoteVersions[0]
+
+	// Compare versions
+	if !isNewerVersion(remoteVersion, localVersion) {
+		fmt.Printf("Current version %s is up to date.\n", localVersion)
+		return nil
+	}
+
+	fmt.Printf("New version %s available (current: %s). Updating...\n", remoteVersion, localVersion)
+
+	// Download zip
+	zipURL := fmt.Sprintf("https://github.com/vira-language/vira/releases/download/v%s/%s", remoteVersion, zipName)
+	zipData, err := downloadFileToBytes(zipURL)
+	if err != nil {
+		return fmt.Errorf("failed to download zip: %v", err)
+	}
+
+	// Unzip
+	if err := unzipBytes(zipData, binDir, sysBinDir, osName); err != nil {
+		return fmt.Errorf("failed to unzip: %v", err)
+	}
+
+	// Update local version
+	if err := writeVersion(versionFile, remoteVersion); err != nil {
+		return fmt.Errorf("failed to update local version: %v", err)
+	}
+
+	fmt.Println("Update successful.")
+	return nil
+}
+
+func readVersion(filePath string) (string, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", err
+	}
+	var versions []string
+	if err := json.Unmarshal(data, &versions); err != nil || len(versions) == 0 {
+		return "", fmt.Errorf("invalid version JSON")
+	}
+	return versions[0], nil
+}
+
+func writeVersion(filePath string, version string) error {
+	data, err := json.Marshal([]string{version})
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filePath, data, 0644)
+}
+
+func downloadFileToBytes(url string) ([]byte, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
 	}
 	defer resp.Body.Close()
-
-	remoteData, err := io.ReadAll(resp.Body)
-	if err != nil {
-		pterm.Error.Println("Failed to read remote version.")
-		return
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("bad status: %s", resp.Status)
 	}
-
-	var remoteVer []string
-	err = json.Unmarshal(remoteData, &remoteVer)
-	if err != nil {
-		pterm.Error.Println("Invalid remote version.")
-		return
-	}
-	remoteV := remoteVer[0]
-
-	if compareVersions(remoteV, localV) <= 0 {
-		pterm.Success.Printf("Already up to date (version %s)\n", localV)
-		return
-	}
-
-	pterm.Warning.Printf("Update available: %s (current: %s)\n", remoteV, localV)
-	pterm.Info.Println("Performing update...")
-
-	// Remove existing files
-	viraBin := systemBinDir + "/vira" + exe
-	viracBin := systemBinDir + "/virac" + exe
-	os.Remove(viraBin)
-	os.Remove(viracBin)
-
-	// Remove all in binDir
-	entries, err := os.ReadDir(binDir)
-	if err == nil {
-		for _, entry := range entries {
-			os.Remove(filepath.Join(binDir, entry.Name()))
-		}
-	}
-
-	// Create dirs if needed
-	os.MkdirAll(systemBinDir, 0755)
-	os.MkdirAll(binDir, 0755)
-
-	versionTag := "v" + remoteV
-	baseURL := "https://github.com/vira-language/vira/releases/download/" + versionTag + "/"
-
-	files := []string{"vira", "virac", "compiler", "vm", "translator", "interpreter", "updater", "plsa"}
-
-	for _, f := range files {
-		fileURL := baseURL + f
-		if runtime.GOOS == "windows" {
-			fileURL += ".exe"
-		}
-
-		pterm.Info.Printf("Downloading %s...\n", f)
-
-		resp, err := http.Get(fileURL)
-		if err != nil {
-			pterm.Error.Printf("Failed to download %s: %v\n", f, err)
-			return
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			pterm.Error.Printf("Failed to download %s: status %d\n", f, resp.StatusCode)
-			return
-		}
-
-		var path string
-		if f == "vira" || f == "virac" {
-			path = systemBinDir + "/" + f + exe
-		} else {
-			path = binDir + "/" + f + exe
-		}
-
-		out, err := os.Create(path)
-		if err != nil {
-			pterm.Error.Printf("Failed to create file %s: %v\n", path, err)
-			return
-		}
-
-		bar := progressbar.DefaultBytes(
-			resp.ContentLength,
-			"Downloading",
-		)
-
-		_, err = io.Copy(io.MultiWriter(out, bar), resp.Body)
-		if err != nil {
-			pterm.Error.Printf("Failed to write %s: %v\n", f, err)
-			out.Close()
-			return
-		}
-		out.Close()
-
-		if runtime.GOOS != "windows" {
-			err = os.Chmod(path, 0755)
-			if err != nil {
-				pterm.Warning.Printf("Failed to chmod %s: %v\n", path, err)
-			}
-		}
-	}
-
-	// Write new version
-	err = os.WriteFile(versionFile, remoteData, 0644)
-	if err != nil {
-		pterm.Error.Printf("Failed to write new version: %v\n", err)
-		return
-	}
-
-	pterm.Success.Printf("Updated to version %s\n", remoteV)
+	return io.ReadAll(resp.Body)
 }
 
-// Simple version compare (assuming x.y.z)
-func compareVersions(v1, v2 string) int {
-	parts1 := strings.Split(v1, ".")
-	parts2 := strings.Split(v2, ".")
+func unzipBytes(data []byte, binDir, sysBinDir, osName string) error {
+	r, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return err
+	}
 
-	maxLen := len(parts1)
-	if len(parts2) > maxLen {
-		maxLen = len(parts2)
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(sysBinDir, 0755); err != nil {
+		return err
+	}
+
+	for _, f := range r.File {
+		if f.FileInfo().IsDir() {
+			continue
+		}
+
+		fileName := f.Name
+		baseName := filepath.Base(fileName)
+		targetDir := binDir
+
+		exeSuffix := ""
+		if osName == "windows" {
+			exeSuffix = ".exe"
+		}
+
+		if strings.EqualFold(baseName, "vira"+exeSuffix) || strings.EqualFold(baseName, "virac"+exeSuffix) {
+			targetDir = sysBinDir
+		}
+
+		targetPath := filepath.Join(targetDir, baseName)
+
+		outFile, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
+		if err != nil {
+			return err
+		}
+		defer outFile.Close()
+
+		rc, err := f.Open()
+		if err != nil {
+			return err
+		}
+		defer rc.Close()
+
+		_, err = io.Copy(outFile, rc)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func isNewerVersion(remote, local string) bool {
+	remoteParts := strings.Split(remote, ".")
+	localParts := strings.Split(local, ".")
+
+	maxLen := len(remoteParts)
+	if len(localParts) > maxLen {
+		maxLen = len(localParts)
 	}
 
 	for i := 0; i < maxLen; i++ {
-		p1 := 0
-		if i < len(parts1) {
-			fmt.Sscan(parts1[i], &p1)
+		var remoteNum, localNum int
+		if i < len(remoteParts) {
+			remoteNum, _ = strconv.Atoi(remoteParts[i])
 		}
-		p2 := 0
-		if i < len(parts2) {
-			fmt.Sscan(parts2[i], &p2)
+		if i < len(localParts) {
+			localNum, _ = strconv.Atoi(localParts[i])
 		}
-		if p1 > p2 {
-			return 1
-		} else if p1 < p2 {
-			return -1
+		if remoteNum > localNum {
+			return true
+		} else if remoteNum < localNum {
+			return false
 		}
 	}
-	return 0
+	return false
 }
