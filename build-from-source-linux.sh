@@ -10,4 +10,7 @@ cd updater
 go get updater
 go build
 cd ..
+cd diagnostic
+cargo build --release
+cd ..
 cd 
