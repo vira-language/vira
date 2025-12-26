@@ -15,3 +15,17 @@ cargo build --release
 cd ..
 cd preprocessor
 gcc main.c -o preprocessor 
+cd ..
+cd ..
+cd cli
+cd vira
+go get vira
+go build
+cd ..
+cd virac
+go get virac
+go build
+cd ..
+cd virus
+go get virus
+go build
