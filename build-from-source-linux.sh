@@ -13,4 +13,5 @@ cd ..
 cd diagnostic
 cargo build --release
 cd ..
-cd 
+cd preprocessor
+gcc main.c -o preprocessor 
