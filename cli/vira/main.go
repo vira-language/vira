@@ -52,6 +52,7 @@ func main() {
 	}
 
 	rootCmd.AddCommand(compileCmd, updateCmd)
+
 	if err := rootCmd.Execute(); err != nil {
 		pterm.Error.Println(err)
 		os.Exit(1)
@@ -60,8 +61,6 @@ func main() {
 
 func compile(inputFile string) {
 	outputPre := inputFile + ".pre"
-	outputPlsa := inputFile + ".ast" // Assume some output
-	outputDiag := inputFile + ".diag" // Assume
 
 	pterm.DefaultSection.Println("Preprocessing")
 	preprocessor := filepath.Join(binPath, "preprocessor")
