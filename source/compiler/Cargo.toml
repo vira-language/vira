@@ -1,1 +1,18 @@
+[package]
+name = "compiler"
+version = "0.1.0"
+edition = "2021"
+authors = ["Michał Kaczmarzyk <michalkaczmarzyk2009@gmail.com>"]
+description = "Compiler for the Vira programming language"
+license = "MIT"
+
+[dependencies]
+cranelift = "0.95"
+cranelift-codegen = { version = "0.95", features = ["x86"] }
+cranelift-frontend = "0.95"
+cranelift-module = "0.95"
+cranelift-object = "0.95"
+
+# Optional, for better error reporting or helper macros
+anyhow = "1.0"
 
