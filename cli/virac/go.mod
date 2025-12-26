@@ -1,10 +1,9 @@
 module virac
 
-go 1.22.0
+go 1.22
 
 require (
-	github.com/charmbracelet/bubbles v0.18.3
-	github.com/charmbracelet/bubbletea v0.26.6
-	github.com/pterm/pterm v1.2.0
-	github.com/schollz/progressbar/v3 v3.14.4
+	github.com/pterm/pterm v0.12.31
+	github.com/spf13/cobra v1.8.0
+	github.com/spf13/pflag v1.0.5
 )
