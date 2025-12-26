@@ -1,126 +1,134 @@
 package main
 
 import (
-	"flag"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 
 	"github.com/pterm/pterm"
+	"github.com/spf13/cobra"
 )
 
-var systemBinDir string
-var libDir string
-var binDir string
-var exe string
+var binPath string
 
 func init() {
-	if runtime.GOOS == "windows" {
-		exe = ".exe"
-		systemBinDir = `C:\\Program Files\\Vira\\bin`
-		libDir = `C:\\Program Files\\Vira\\lib`
-		binDir = libDir + `\\bin`
+	osName := runtime.GOOS
+	if osName == "linux" {
+		binPath = "/usr/lib/vira-lang/bin"
+	} else if osName == "windows" {
+		programFiles := os.Getenv("ProgramFiles")
+		if programFiles == "" {
+			programFiles = "C:\\Program Files"
+		}
+		binPath = filepath.Join(programFiles, "ViraLang", "bin")
 	} else {
-		exe = ""
-		systemBinDir = "/usr/bin"
-		libDir = "/usr/lib/vira-lang"
-		binDir = libDir + "/bin"
+		pterm.Fatal.Println("Unsupported OS")
+		os.Exit(1)
 	}
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		pterm.DefaultHeader.WithFullWidth().Println("Virac - Vira Compiler CLI")
-		pterm.Info.Println("Usage:")
-		pterm.Info.Println("  virac compile <file.vira> -o <output> [--target <windows|linux>] [--arch <x64>] [--bytecode]")
-		pterm.Info.Println("  --target: windows or linux (default: current os)")
-		pterm.Info.Println("  --arch: x64 (default)")
-		pterm.Info.Println("  --bytecode: Compile to bytecode (.object) instead of native binary")
-		return
+	var rootCmd = &cobra.Command{
+		Use:   "virac [input.vira]",
+		Short: "Vira compilation tool",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			compile(args[0])
+		},
 	}
 
-	cmd := os.Args[1]
-	if cmd != "compile" {
-		pterm.Error.Println("Unknown command. Use 'compile'")
-		return
+	if err := rootCmd.Execute(); err != nil {
+		pterm.Error.Println(err)
+		os.Exit(1)
 	}
-
-	var output string
-	var targetOS string
-	var arch string
-	var bytecode bool
-
-	fs := flag.NewFlagSet("compile", flag.ExitOnError)
-	fs.StringVar(&output, "o", "", "Output file")
-	fs.StringVar(&targetOS, "target", runtime.GOOS, "Target OS: windows or linux")
-	fs.StringVar(&arch, "arch", "x64", "Target architecture: x64")
-	fs.BoolVar(&bytecode, "bytecode", false, "Compile to bytecode")
-	fs.Parse(os.Args[2:])
-
-	if len(fs.Args()) < 1 {
-		pterm.Error.Println("Missing input file")
-		return
-	}
-	input := fs.Args()[0]
-
-	if output == "" {
-		base := filepath.Base(input)
-		ext := filepath.Ext(base)
-		output = base[:len(base)-len(ext)]
-		if bytecode {
-			output += ".object"
-		} else if targetOS == "windows" {
-			output += ".exe"
-		}
-	}
-
-	compile(input, output, targetOS, arch, bytecode)
 }
 
-func compile(input, output, targetOS, arch string, bytecode bool) {
-	spinner, _ := pterm.DefaultSpinner.Start("Compiling...")
+func compile(inputFile string) {
+	outputPre := inputFile + ".pre"
+	outputObj := inputFile + ".o"
 
-	var err error
-	if bytecode {
-		compilerBin := binDir + "/compiler" + exe
-		cmd := exec.Command(compilerBin, input, "-o", output)
-		err = cmd.Run()
+	pterm.DefaultSection.Println("Preprocessing")
+	preprocessor := filepath.Join(binPath, "preprocessor")
+	if runtime.GOOS == "windows" {
+		preprocessor += ".exe"
+	}
+	cmdPre := exec.Command(preprocessor, inputFile, outputPre)
+	if out, err := cmdPre.CombinedOutput(); err != nil {
+		handleError(outputPre, string(out))
+		os.Exit(1)
+	}
+	pterm.Success.Println("Preprocessing done")
+
+	pterm.DefaultSection.Println("Parsing and Checking")
+	plsa := filepath.Join(binPath, "plsa")
+	if runtime.GOOS == "windows" {
+		plsa += ".exe"
+	}
+	cmdPlsa := exec.Command(plsa, outputPre)
+	if out, err := cmdPlsa.CombinedOutput(); err != nil {
+		handleError(outputPre, string(out))
+		os.Exit(1)
+	}
+	pterm.Success.Println("PLSA done")
+
+	pterm.DefaultSection.Println("Compiling")
+	compiler := filepath.Join(binPath, "compiler")
+	if runtime.GOOS == "windows" {
+		compiler += ".exe"
+	}
+	cmdComp := exec.Command(compiler, outputPre, outputObj)
+	if out, err := cmdComp.CombinedOutput(); err != nil {
+		handleError(outputPre, string(out))
+		os.Exit(1)
+	}
+	pterm.Success.Println("Compilation done")
+
+	// Optional: Link to executable
+	pterm.DefaultSection.Println("Linking")
+	linker := "gcc"
+	if runtime.GOOS == "windows" {
+		linker = "link.exe" // Adjust as needed
+		outputExe := inputFile + ".exe"
+		cmdLink := exec.Command(linker, "/OUT:"+outputExe, outputObj) // Simplified
+		if out, err := cmdLink.CombinedOutput(); err != nil {
+			pterm.Error.Println(string(out))
+			os.Exit(1)
+		}
 	} else {
-		// Translate to C
-		tempC := filepath.Join(os.TempDir(), "vira_temp.c")
-		translatorBin := binDir + "/translator" + exe
-		transCmd := exec.Command(translatorBin, "translate", input, "--target", "c", "--output", tempC)
-		err = transCmd.Run()
-		if err != nil {
-			spinner.Fail("Translation failed")
-			pterm.Error.Printf("Error: %v\n", err)
-			return
+		outputExe := "a.out" // Or input without ext
+		cmdLink := exec.Command(linker, outputObj, "-o", outputExe)
+		if out, err := cmdLink.CombinedOutput(); err != nil {
+			pterm.Error.Println(string(out))
+			os.Exit(1)
 		}
-
-		// Compile with zig
-		var zigTarget string
-		if targetOS == "windows" && arch == "x64" {
-			zigTarget = "x86_64-windows-gnu"
-		} else if targetOS == "linux" && arch == "x64" {
-			zigTarget = "x86_64-linux-gnu"
-		} else {
-			spinner.Fail("Unsupported target")
-			return
-		}
-
-		zigCmd := exec.Command("zig", "cc", "-target", zigTarget, "-o", output, tempC)
-		err = zigCmd.Run()
-		os.Remove(tempC)
 	}
+	pterm.Success.Println("Linking done")
+}
 
-	if err != nil {
-		spinner.Fail("Compilation failed")
-		pterm.Error.Printf("Error: %v\n", err)
-		return
+func handleError(sourceFile, errorMsg string) {
+	pterm.Error.Println("Error occurred. Running diagnostic...")
+
+	// Parse errorMsg for line, column, message
+	// For simplicity, assume errorMsg has "line X, column Y: message"
+	// Mock parsing
+	line := 1
+	column := 1
+	message := errorMsg // Full message
+
+	diagnostic := filepath.Join(binPath, "diagnostic")
+	if runtime.GOOS == "windows" {
+		diagnostic += ".exe"
 	}
-
-	spinner.Success("Compilation completed")
-	pterm.Success.Printf("Output: %s\n", output)
+	cmdDiag := exec.Command(diagnostic,
+		"--source", sourceFile,
+		"--message", message,
+		"--line", string(line + '0'), // Convert to string
+		"--column", string(column + '0'),
+	)
+	if out, err := cmdDiag.CombinedOutput(); err != nil {
+		pterm.Error.Println(string(out))
+	} else {
+		pterm.Info.Println(string(out))
+	}
 }
