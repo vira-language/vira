@@ -1,261 +1,125 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
 
 	"github.com/pterm/pterm"
-	"github.com/schollz/progressbar/v3"
+	"github.com/spf13/cobra"
 )
 
-var systemBinDir string
-var libDir string
-var binDir string
-var exe string
+var binPath string
 
 func init() {
-	if runtime.GOOS == "windows" {
-		exe = ".exe"
-		systemBinDir = `C:\\Program Files\\Vira\\bin`
-		libDir = `C:\\Program Files\\Vira\\lib`
-		binDir = libDir + `\\bin`
+	osName := runtime.GOOS
+	if osName == "linux" {
+		binPath = "/usr/lib/vira-lang/bin"
+	} else if osName == "windows" {
+		programFiles := os.Getenv("ProgramFiles")
+		if programFiles == "" {
+			programFiles = "C:\\Program Files"
+		}
+		binPath = filepath.Join(programFiles, "ViraLang", "bin")
 	} else {
-		exe = ""
-		systemBinDir = "/usr/bin"
-		libDir = "/usr/lib/vira-lang"
-		binDir = libDir + "/bin"
+		pterm.Fatal.Println("Unsupported OS")
+		os.Exit(1)
 	}
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		pterm.DefaultHeader.WithFullWidth().Println("Vira Language CLI")
-		pterm.Info.Println("Usage:")
-		pterm.Info.Println("  vira <file.vira | file.object>  - Run the file")
-		pterm.Info.Println("  vira update                     - Update Vira")
-		pterm.Info.Println("  vira version                    - Show version")
-		pterm.Info.Println("For compilation use virac, for libraries use virus")
-		return
+	var rootCmd = &cobra.Command{
+		Use:   "vira",
+		Short: "Vira general CLI tool",
 	}
 
-	cmd := os.Args[1]
-	switch cmd {
-	case "update":
-		updateVira()
-	case "version":
-		showVersion()
-	default:
-		// Assume it's a file to run
-		runFile(cmd)
-	}
-}
-
-func runFile(file string) {
-	ext := filepath.Ext(file)
-	var binary string
-	var args []string
-
-	switch ext {
-	case ".vira":
-		binary = binDir + "/interpreter" + exe
-		args = []string{file}
-	case ".object":
-		binary = binDir + "/vm" + exe
-		args = []string{file}
-	default:
-		pterm.Error.Println("Unknown file type. Supported: .vira, .object")
-		return
+	var compileCmd = &cobra.Command{
+		Use:   "compile [input.vira]",
+		Short: "Compile a .vira file",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			compile(args[0])
+		},
 	}
 
-	pterm.Info.Printf("Running %s with %s\n", file, binary)
+	var updateCmd = &cobra.Command{
+		Use:   "update",
+		Short: "Update Vira tools",
+		Run: func(cmd *cobra.Command, args []string) {
+			update()
+		},
+	}
 
-	c := exec.Command(binary, args...)
-	c.Stdout = os.Stdout
-	c.Stderr = os.Stderr
-	err := c.Run()
-	if err != nil {
-		pterm.Error.Printf("Execution failed: %v\n", err)
+	rootCmd.AddCommand(compileCmd, updateCmd)
+	if err := rootCmd.Execute(); err != nil {
+		pterm.Error.Println(err)
+		os.Exit(1)
 	}
 }
 
-func showVersion() {
-	versionFile := libDir + "/version.json"
-	data, err := os.ReadFile(versionFile)
-	if err != nil {
-		pterm.Error.Println("Failed to read version")
-		return
+func compile(inputFile string) {
+	outputPre := inputFile + ".pre"
+	outputPlsa := inputFile + ".ast" // Assume some output
+	outputDiag := inputFile + ".diag" // Assume
+
+	pterm.DefaultSection.Println("Preprocessing")
+	preprocessor := filepath.Join(binPath, "preprocessor")
+	if runtime.GOOS == "windows" {
+		preprocessor += ".exe"
 	}
-	var ver []string
-	json.Unmarshal(data, &ver)
-	pterm.Info.Printf("Vira version: %s\n", ver[0])
+	cmdPre := exec.Command(preprocessor, inputFile, outputPre)
+	if out, err := cmdPre.CombinedOutput(); err != nil {
+		pterm.Error.Println(string(out))
+		os.Exit(1)
+	}
+	pterm.Success.Println("Preprocessing done")
+
+	pterm.DefaultSection.Println("Parsing and Checking")
+	plsa := filepath.Join(binPath, "plsa")
+	if runtime.GOOS == "windows" {
+		plsa += ".exe"
+	}
+	cmdPlsa := exec.Command(plsa, outputPre)
+	if out, err := cmdPlsa.CombinedOutput(); err != nil {
+		pterm.Error.Println(string(out))
+		os.Exit(1)
+	}
+	pterm.Success.Println("PLSA done")
+
+	// Assume diagnostic needs error simulation, but for now skip or mock
+	// diagnostic := filepath.Join(binPath, "diagnostic")
+	// cmdDiag := exec.Command(diagnostic, "--source", outputPre, "--message", "error", "--line", "1", "--column", "1")
+	// if out, err := cmdDiag.CombinedOutput(); err != nil {
+	// 	pterm.Error.Println(string(out))
+	// 	os.Exit(1)
+	// }
+	// pterm.Success.Println("Diagnostic done")
+
+	pterm.DefaultSection.Println("Compiling")
+	compiler := filepath.Join(binPath, "compiler")
+	if runtime.GOOS == "windows" {
+		compiler += ".exe"
+	}
+	outputObj := inputFile + ".o"
+	cmdComp := exec.Command(compiler, outputPre, outputObj)
+	if out, err := cmdComp.CombinedOutput(); err != nil {
+		pterm.Error.Println(string(out))
+		os.Exit(1)
+	}
+	pterm.Success.Println("Compilation done")
 }
 
-func updateVira() {
-	pterm.Info.Println("Checking for updates...")
-
-	versionFile := libDir + "/version.json"
-	localData, err := os.ReadFile(versionFile)
-	if err != nil {
-		pterm.Error.Println("No local version found")
-		return
+func update() {
+	pterm.DefaultSection.Println("Updating Vira")
+	updater := filepath.Join(binPath, "updater")
+	if runtime.GOOS == "windows" {
+		updater += ".exe"
 	}
-
-	var localVer []string
-	err = json.Unmarshal(localData, &localVer)
-	if err != nil {
-		pterm.Error.Println("Invalid local version")
-		return
+	cmdUpdate := exec.Command(updater)
+	if out, err := cmdUpdate.CombinedOutput(); err != nil {
+		pterm.Error.Println(string(out))
+		os.Exit(1)
 	}
-	localV := localVer[0]
-
-	remoteURL := "https://raw.githubusercontent.com/vira-language/vira/main/repository/vira-version.json"
-	resp, err := http.Get(remoteURL)
-	if err != nil {
-		pterm.Error.Printf("Failed to fetch remote version: %v\n", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	remoteData, err := io.ReadAll(resp.Body)
-	if err != nil {
-		pterm.Error.Println("Failed to read remote version")
-		return
-	}
-
-	var remoteVer []string
-	err = json.Unmarshal(remoteData, &remoteVer)
-	if err != nil {
-		pterm.Error.Println("Invalid remote version")
-		return
-	}
-	remoteV := remoteVer[0]
-
-	if compareVersions(remoteV, localV) <= 0 {
-		pterm.Success.Printf("Already up to date (version %s)\n", localV)
-		return
-	}
-
-	pterm.Warning.Printf("Update available: %s (current: %s)\n", remoteV, localV)
-	pterm.Info.Println("Updating...")
-
-	// Remove existing files
-	viraBin := systemBinDir + "/vira" + exe
-	viracBin := systemBinDir + "/virac" + exe
-	os.Remove(viraBin)
-	os.Remove(viracBin)
-
-	// Remove all in binDir
-	entries, err := os.ReadDir(binDir)
-	if err == nil {
-		for _, entry := range entries {
-			os.Remove(filepath.Join(binDir, entry.Name()))
-		}
-	}
-
-	// Create dirs if needed
-	os.MkdirAll(systemBinDir, 0755)
-	os.MkdirAll(binDir, 0755)
-
-	versionTag := "v" + remoteV
-	baseURL := "https://github.com/vira-language/vira/releases/download/" + versionTag + "/"
-
-	files := []string{"vira", "virac", "compiler", "vm", "translator", "interpreter", "updater", "plsa"}
-
-	for _, f := range files {
-		fileURL := baseURL + f
-		if runtime.GOOS == "windows" {
-			fileURL += ".exe"
-		}
-
-		pterm.Info.Printf("Downloading %s...\n", f)
-
-		resp, err := http.Get(fileURL)
-		if err != nil {
-			pterm.Error.Printf("Failed to download %s: %v\n", f, err)
-			return
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			pterm.Error.Printf("Failed to download %s: status %d\n", f, resp.StatusCode)
-			return
-		}
-
-		var path string
-		if f == "vira" || f == "virac" {
-			path = systemBinDir + "/" + f + exe
-		} else {
-			path = binDir + "/" + f + exe
-		}
-
-		out, err := os.Create(path)
-		if err != nil {
-			pterm.Error.Printf("Failed to create file %s: %v\n", path, err)
-			return
-		}
-
-		bar := progressbar.DefaultBytes(
-			resp.ContentLength,
-			"Downloading",
-		)
-
-		_, err = io.Copy(io.MultiWriter(out, bar), resp.Body)
-		if err != nil {
-			pterm.Error.Printf("Failed to write %s: %v\n", f, err)
-			out.Close()
-			return
-		}
-		out.Close()
-
-		if runtime.GOOS != "windows" {
-			err = os.Chmod(path, 0755)
-			if err != nil {
-				pterm.Warning.Printf("Failed to chmod %s: %v\n", path, err)
-			}
-		}
-	}
-
-	// Write new version
-	err = os.WriteFile(versionFile, remoteData, 0644)
-	if err != nil {
-		pterm.Error.Printf("Failed to write new version: %v\n", err)
-		return
-	}
-
-	pterm.Success.Printf("Updated to version %s\n", remoteV)
-}
-
-// Simple version compare (assuming x.y.z)
-func compareVersions(v1, v2 string) int {
-	parts1 := strings.Split(v1, ".")
-	parts2 := strings.Split(v2, ".")
-
-	maxLen := len(parts1)
-	if len(parts2) > maxLen {
-		maxLen = len(parts2)
-	}
-
-	for i := 0; i < maxLen; i++ {
-		p1 := 0
-		if i < len(parts1) {
-			fmt.Sscan(parts1[i], &p1)
-		}
-		p2 := 0
-		if i < len(parts2) {
-			fmt.Sscan(parts2[i], &p2)
-		}
-		if p1 > p2 {
-			return 1
-		} else if p1 < p2 {
-			return -1
-		}
-	}
-	return 0
+	pterm.Success.Println("Update done")
 }
